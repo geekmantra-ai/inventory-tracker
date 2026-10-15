@@ -74,7 +74,7 @@ export default {
         const storageProvider = getActiveStorageProvider(env);
         return jsonResponse({
           ok: true,
-          platform: 'Cloudflare Workers + Cloud MongoDB Inventory Platform',
+          platform: 'Cloudflare Workers + Cloudflare D1 Native Edge SQL Inventory Platform',
           database: dbStatus,
           imageStorage: {
             activeProvider: storageProvider,
@@ -86,8 +86,8 @@ export default {
                 why: 'Uploads compressed WebP product photos via GitHub Contents REST API (`PUT /repos/:owner/:repo/contents/product-images/:file`) and serves them globally via `https://cdn.jsdelivr.net/gh/<owner>/<repo>@main/product-images/<file>`.',
               },
               {
-                name: 'Cloud MongoDB + Cloudflare Edge Cache (Automatic Local/Edge Fallback)',
-                freeTier: '512 MB free on MongoDB Atlas M0 (~15,000+ WebP product photos), No Credit Card Required',
+                name: 'Cloudflare D1 + Edge Cache (Automatic Edge Fallback)',
+                freeTier: '5 GB free D1 database storage + Cloudflare Edge Cache, No Credit Card Required',
                 why: 'Used automatically when `GITHUB_TOKEN` & `GITHUB_REPO` are not yet set so image uploads work out-of-the-box.',
               },
             ],

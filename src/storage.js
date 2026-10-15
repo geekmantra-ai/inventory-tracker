@@ -32,7 +32,7 @@ export function getActiveStorageProvider(env = {}) {
   if (env.GITHUB_TOKEN && env.GITHUB_REPO) {
     return 'github-jsdelivr-cdn';
   }
-  return 'mongodb-edge-cached';
+  return 'd1-edge-cached';
 }
 
 async function uploadToGitHubRepo({ imageId, base64Data }, env, originUrl) {
@@ -142,7 +142,7 @@ export async function uploadProductImage(fileOrDataUrl, env = {}, originUrl = ''
 
   return {
     url: `${originUrl ? `${originUrl}` : ''}/api/images/${imageId}`,
-    provider: 'mongodb-edge-cached',
+    provider: 'd1-edge-cached',
     key: imageId,
   };
 }

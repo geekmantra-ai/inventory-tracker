@@ -1,14 +1,13 @@
-// Cloud MongoDB (MongoDB Atlas) Data Layer for Cloudflare Workers
-// Uses the official `mongodb` driver when `MONGODB_URI` is configured,
-// with an automatic fallback store so local development works out-of-the-box.
+// Cloudflare D1 Native Edge SQL Data Layer for Cloudflare Workers
+//
+// Zero-latency serverless SQL database running natively at Cloudflare Edge.
+// Zero TCP socket timeouts, zero connection freezing, ultra-lightweight.
 
 import { hashPassword } from './auth.js';
 
-let cachedMongoClient = null;
-let cachedMongoDb = null;
-let cachedUri = null;
+let d1Initialized = false;
 
-// Fallback store when MONGODB_URI is not yet set
+// Fallback store when env.DB binding is not yet attached (e.g. initial dev or mock tests)
 const memoryStore = {
   initialized: false,
   users: [],
@@ -30,6 +29,68 @@ function generateProductId() {
 function computeStatus(quantity) {
   const qty = Math.max(0, Number(quantity) || 0);
   return qty === 0 ? 'Out of Stock' : 'In Stock';
+}
+
+export async function ensureD1Tables(env) {
+  if (d1Initialized || !env?.DB || typeof env.DB.exec !== 'function') return;
+  try {
+    await env.DB.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        role TEXT NOT NULL DEFAULT 'admin',
+        passwordHash TEXT NOT NULL,
+        createdAt TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS products (
+        id TEXT PRIMARY KEY,
+        sku TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        quantity INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'In Stock',
+        color TEXT DEFAULT '',
+        size TEXT DEFAULT '',
+        imageUrl TEXT DEFAULT '',
+        imageProvider TEXT DEFAULT 'github-jsdelivr-cdn',
+        totalSold INTEGER NOT NULL DEFAULT 0,
+        createdBy TEXT NOT NULL,
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_products_owner ON products(createdBy);
+      CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
+
+      CREATE TABLE IF NOT EXISTS activities (
+        id TEXT PRIMARY KEY,
+        action TEXT NOT NULL,
+        productId TEXT,
+        productTitle TEXT,
+        quantityBefore INTEGER,
+        quantityAfter INTEGER,
+        actorEmail TEXT NOT NULL,
+        actorName TEXT NOT NULL,
+        details TEXT DEFAULT '',
+        timestamp TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_activities_owner ON activities(actorEmail);
+      CREATE INDEX IF NOT EXISTS idx_activities_product ON activities(productId);
+
+      CREATE TABLE IF NOT EXISTS product_images (
+        id TEXT PRIMARY KEY,
+        contentType TEXT NOT NULL,
+        base64Data TEXT NOT NULL,
+        createdAt TEXT NOT NULL
+      );
+    `);
+    d1Initialized = true;
+  } catch (err) {
+    console.warn('D1 schema initialization warning:', err?.message || err);
+  }
 }
 
 async function ensureFallbackSeeded() {
@@ -148,176 +209,22 @@ async function ensureFallbackSeeded() {
   );
 }
 
-function sanitizeMongoUri(rawUri) {
-  const trimmed = String(rawUri || '').trim();
-  const schemeMatch = trimmed.match(/^(mongodb(?:\+srv)?:\/\/)(.+)$/);
-  if (!schemeMatch) return trimmed;
-  const scheme = schemeMatch[1];
-  const rest = schemeMatch[2];
-  const slashIdx = rest.indexOf('/');
-  const authority = slashIdx === -1 ? rest : rest.slice(0, slashIdx);
-  const pathAndQuery = slashIdx === -1 ? '' : rest.slice(slashIdx);
-
-  const lastAtIdx = authority.lastIndexOf('@');
-  if (lastAtIdx === -1) return trimmed;
-
-  const userInfo = authority.slice(0, lastAtIdx);
-  const hostPart = authority.slice(lastAtIdx + 1);
-  const colonIdx = userInfo.indexOf(':');
-  if (colonIdx === -1) return trimmed;
-
-  const rawUser = decodeURIComponent(userInfo.slice(0, colonIdx));
-  const rawPass = decodeURIComponent(userInfo.slice(colonIdx + 1));
-  return `${scheme}${encodeURIComponent(rawUser)}:${encodeURIComponent(rawPass)}@${hostPart}${pathAndQuery}`;
-}
-
-let lastFailedAt = 0;
-let lastMongoError = null;
-let lastActivityAt = 0;
-const ISOLATE_IDLE_TIMEOUT_MS = 20000;
-
-function withTimeout(promise, ms = 10000, name = 'Database Operation') {
-  let timer;
-  const timeoutPromise = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      const err = new Error(`${name} timed out after ${ms}ms`);
-      err.name = 'TimeoutError';
-      reject(err);
-    }, ms);
-  });
-  return Promise.race([promise, timeoutPromise]).finally(() => {
-    clearTimeout(timer);
-  });
-}
-
-async function getMongoDatabase(env = {}) {
-  const uri = sanitizeMongoUri(env.MONGODB_URI || '');
-  if (!uri) return null;
-
-  // If isolate was frozen/idle for > 20s, TCP sockets are frequently severed by edge firewalls.
-  // Proactively close the stale socket so queries don't hang.
-  if (cachedMongoDb && cachedUri === uri) {
-    if (Date.now() - lastActivityAt < ISOLATE_IDLE_TIMEOUT_MS) {
-      return cachedMongoDb;
-    }
-    try {
-      cachedMongoClient?.close()?.catch?.(() => {});
-    } catch {}
-    cachedMongoClient = null;
-    cachedMongoDb = null;
-  }
-
-  try {
-    const { MongoClient } = await import('mongodb');
-    if (cachedMongoClient) {
-      try {
-        await cachedMongoClient.close();
-      } catch {}
-    }
-    const client = new MongoClient(uri, {
-      maxPoolSize: 5,
-      minPoolSize: 0,
-      maxIdleTimeMS: 20000,
-      serverSelectionTimeoutMS: 10000,
-      connectTimeoutMS: 10000,
-      socketTimeoutMS: 8000,
-      family: 4,
-    });
-    if (typeof client.on === 'function') {
-      client.on('error', (e) => {
-        console.warn('MongoClient background socket notice:', e?.message || e);
-      });
-    }
-
-    await withTimeout(client.connect(), 10000, 'MongoClient.connect');
-    const dbName = env.MONGODB_DB_NAME || 'inventory_platform';
-    cachedMongoClient = client;
-    cachedMongoDb = client.db(dbName);
-    cachedUri = uri;
-    lastFailedAt = 0;
-    lastMongoError = null;
-    lastActivityAt = Date.now();
-
-    return cachedMongoDb;
-  } catch (err) {
-    cachedUri = uri;
-    lastFailedAt = Date.now();
-    lastMongoError = err.message;
-    console.warn('MongoDB connection notice (using fallback store):', err.message);
-    return null;
-  }
-}
-
 export async function getDbStatus(env = {}) {
-  const db = await getMongoDatabase(env);
-  if (db) {
+  if (env.DB) {
+    await ensureD1Tables(env);
     return {
-      mode: 'mongodb-atlas',
+      mode: 'cloudflare-d1',
       connected: true,
-      database: env.MONGODB_DB_NAME || 'inventory_platform',
+      database: 'stockpulse-db (Native Edge SQLite)',
+      engine: 'Cloudflare D1 (0ms TCP cold-start, instant queries)',
     };
   }
   await ensureFallbackSeeded();
   return {
     mode: 'edge-fallback-store',
     connected: true,
-    database: lastMongoError
-      ? `local_memory_fallback (MongoDB note: ${lastMongoError})`
-      : 'local_memory_fallback (set MONGODB_URI for Cloud MongoDB Atlas)',
+    database: 'local_memory_fallback (Attach Cloudflare D1 via wrangler.toml [[d1_databases]])',
   };
-}
-
-async function executeMongo(env, operation, fallbackFn) {
-  const hasMongo = Boolean(env.MONGODB_URI);
-  let db = null;
-  try {
-    db = await withTimeout(getMongoDatabase(env), 10000, 'getMongoDatabase');
-  } catch (connErr) {
-    console.warn('MongoDB getMongoDatabase warning:', connErr?.message || connErr);
-  }
-
-  if (db) {
-    try {
-      const res = await withTimeout(operation(db), 8000, 'MongoDB query');
-      lastActivityAt = Date.now();
-      return res;
-    } catch (err) {
-      console.warn('MongoDB query failed or timed out, resetting connection and retrying once:', err?.message || err);
-      try {
-        cachedMongoClient?.close()?.catch?.(() => {});
-      } catch {}
-      cachedMongoClient = null;
-      cachedMongoDb = null;
-      lastFailedAt = Date.now();
-      lastMongoError = err?.message || String(err);
-
-      // Auto-retry once on a fresh connection if MongoDB is configured
-      if (hasMongo) {
-        try {
-          const retryDb = await withTimeout(getMongoDatabase(env), 10000, 'retryConnect');
-          if (retryDb) {
-            const res = await withTimeout(operation(retryDb), 8000, 'retryQuery');
-            lastActivityAt = Date.now();
-            return res;
-          }
-        } catch (retryErr) {
-          console.warn('MongoDB retry attempt failed:', retryErr?.message || retryErr);
-        }
-      }
-    }
-  }
-
-  // Only fall back to memoryStore if MONGODB_URI is not provided
-  if (!hasMongo) {
-    return await fallbackFn();
-  }
-
-  // If MONGODB_URI was configured, don't return false "not found" data from empty memoryStore
-  const err = new Error(
-    `Database connection is establishing (${lastMongoError || 'connecting...'}). Please retry.`
-  );
-  err.status = 503;
-  throw err;
 }
 
 export async function recordActivity(env, event) {
@@ -334,17 +241,30 @@ export async function recordActivity(env, event) {
     timestamp: new Date().toISOString(),
   };
 
-  await executeMongo(
-    env,
-    (db) => db.collection('activities').insertOne({ ...entry }),
-    async () => {
-      await ensureFallbackSeeded();
-      memoryStore.activities.unshift(entry);
-      if (memoryStore.activities.length > 500) {
-        memoryStore.activities.length = 500;
-      }
+  if (env.DB) {
+    await ensureD1Tables(env);
+    await env.DB.prepare(`
+      INSERT INTO activities (id, action, productId, productTitle, quantityBefore, quantityAfter, actorEmail, actorName, details, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      entry.id,
+      entry.action,
+      entry.productId,
+      entry.productTitle,
+      entry.quantityBefore,
+      entry.quantityAfter,
+      entry.actorEmail,
+      entry.actorName,
+      entry.details,
+      entry.timestamp
+    ).run();
+  } else {
+    await ensureFallbackSeeded();
+    memoryStore.activities.unshift(entry);
+    if (memoryStore.activities.length > 500) {
+      memoryStore.activities.length = 500;
     }
-  );
+  }
 
   return entry;
 }
@@ -356,43 +276,43 @@ export async function listActivities(
   const normalizedOwner = String(ownerEmail || '').trim().toLowerCase();
   if (!normalizedOwner) return [];
 
-  const query = { actorEmail: normalizedOwner };
-  if (productId) query.productId = productId;
-
-  const rawDocs = await executeMongo(
-    env,
-    (db) =>
-      db
-        .collection('activities')
-        .find(query, { projection: { _id: 0 } })
-        .sort({ timestamp: -1 })
-        .limit(Number(limit) || 100)
-        .toArray(),
-    async () => {
-      await ensureFallbackSeeded();
-      let items = memoryStore.activities.filter(
-        (a) => String(a.actorEmail || '').toLowerCase() === normalizedOwner
-      );
-      if (productId) {
-        items = items.filter((a) => a.productId === productId);
-      }
-      return items.slice(0, Number(limit) || 100);
+  if (env.DB) {
+    await ensureD1Tables(env);
+    let query = 'SELECT * FROM activities WHERE actorEmail = ?';
+    const params = [normalizedOwner];
+    if (productId) {
+      query += ' AND productId = ?';
+      params.push(productId);
     }
-  );
+    query += ' ORDER BY timestamp DESC LIMIT ?';
+    params.push(Number(limit) || 100);
 
-  return Array.isArray(rawDocs) ? rawDocs : [];
+    const { results } = await env.DB.prepare(query).bind(...params).all();
+    return results || [];
+  }
+
+  await ensureFallbackSeeded();
+  let items = memoryStore.activities.filter(
+    (a) => String(a.actorEmail || '').toLowerCase() === normalizedOwner
+  );
+  if (productId) {
+    items = items.filter((a) => a.productId === productId);
+  }
+  return items.slice(0, Number(limit) || 100);
 }
 
 export async function findUserByEmail(env, email) {
   const normalized = String(email || '').trim().toLowerCase();
-  return executeMongo(
-    env,
-    (db) => db.collection('users').findOne({ email: normalized }, { projection: { _id: 0 } }),
-    async () => {
-      await ensureFallbackSeeded();
-      return memoryStore.users.find((u) => u.email === normalized) || null;
-    }
-  );
+  if (env.DB) {
+    await ensureD1Tables(env);
+    const user = await env.DB.prepare('SELECT id, name, email, role, passwordHash, createdAt FROM users WHERE LOWER(email) = ?')
+      .bind(normalized)
+      .first();
+    return user || null;
+  }
+
+  await ensureFallbackSeeded();
+  return memoryStore.users.find((u) => u.email === normalized) || null;
 }
 
 export async function createUser(env, { name, email, passwordHash, role = 'admin' }) {
@@ -406,14 +326,16 @@ export async function createUser(env, { name, email, passwordHash, role = 'admin
     createdAt: new Date().toISOString(),
   };
 
-  await executeMongo(
-    env,
-    (db) => db.collection('users').insertOne({ ...user }),
-    async () => {
-      await ensureFallbackSeeded();
-      memoryStore.users.push(user);
-    }
-  );
+  if (env.DB) {
+    await ensureD1Tables(env);
+    await env.DB.prepare('INSERT INTO users (id, name, email, role, passwordHash, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(user.id, user.name, user.email, user.role, user.passwordHash, user.createdAt)
+      .run();
+    return user;
+  }
+
+  await ensureFallbackSeeded();
+  memoryStore.users.push(user);
   return user;
 }
 
@@ -424,23 +346,43 @@ export async function listProducts(
   const normalizedOwner = String(ownerEmail || '').trim().toLowerCase();
   if (!normalizedOwner) return [];
 
-  const rawProducts = await executeMongo(
-    env,
-    (db) =>
-      db
-        .collection('products')
-        .find({ createdBy: normalizedOwner }, { projection: { _id: 0 } })
-        .sort({ createdAt: -1 })
-        .toArray(),
-    async () => {
-      await ensureFallbackSeeded();
-      return memoryStore.products
-        .filter((p) => String(p.createdBy || '').toLowerCase() === normalizedOwner)
-        .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-    }
-  );
+  if (env.DB) {
+    await ensureD1Tables(env);
+    let query = 'SELECT * FROM products WHERE LOWER(createdBy) = ?';
+    const params = [normalizedOwner];
 
-  const products = Array.isArray(rawProducts) ? rawProducts : [];
+    if (search) {
+      query += ' AND (LOWER(title) LIKE ? OR LOWER(description) LIKE ? OR LOWER(id) LIKE ? OR LOWER(color) LIKE ? OR LOWER(size) LIKE ?)';
+      const term = `%${search.toLowerCase()}%`;
+      params.push(term, term, term, term, term);
+    }
+    if (status) {
+      if (status === 'out_of_stock') {
+        query += ' AND quantity = 0';
+      } else if (status === 'in_stock') {
+        query += ' AND quantity > 0';
+      } else if (status === 'low_stock') {
+        query += ' AND quantity > 0 AND quantity <= 5';
+      }
+    }
+    if (color) {
+      query += ' AND LOWER(color) = ?';
+      params.push(color.toLowerCase());
+    }
+    if (size) {
+      query += ' AND LOWER(size) = ?';
+      params.push(size.toLowerCase());
+    }
+
+    query += ' ORDER BY createdAt DESC';
+    const { results } = await env.DB.prepare(query).bind(...params).all();
+    return results || [];
+  }
+
+  await ensureFallbackSeeded();
+  let products = memoryStore.products
+    .filter((p) => String(p.createdBy || '').toLowerCase() === normalizedOwner)
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
 
   return products.filter((p) => {
     if (search) {
@@ -468,20 +410,19 @@ export async function getProductById(env, id, ownerEmail = '') {
   const normalizedOwner = String(ownerEmail || '').trim().toLowerCase();
   if (!cleanId || !normalizedOwner) return null;
 
-  return executeMongo(
-    env,
-    (db) =>
-      db
-        .collection('products')
-        .findOne({ id: cleanId, createdBy: normalizedOwner }, { projection: { _id: 0 } }),
-    async () => {
-      await ensureFallbackSeeded();
-      return (
-        memoryStore.products.find(
-          (p) => p.id === cleanId && String(p.createdBy || '').toLowerCase() === normalizedOwner
-        ) || null
-      );
-    }
+  if (env.DB) {
+    await ensureD1Tables(env);
+    const prod = await env.DB.prepare('SELECT * FROM products WHERE id = ? AND LOWER(createdBy) = ?')
+      .bind(cleanId, normalizedOwner)
+      .first();
+    return prod || null;
+  }
+
+  await ensureFallbackSeeded();
+  return (
+    memoryStore.products.find(
+      (p) => p.id === cleanId && String(p.createdBy || '').toLowerCase() === normalizedOwner
+    ) || null
   );
 }
 
@@ -501,21 +442,38 @@ export async function createProduct(env, data, actor = {}) {
     color: data.color ? String(data.color).trim() : '',
     size: data.size ? String(data.size).trim() : '',
     imageUrl: data.imageUrl || '',
-    imageProvider: data.imageProvider || 'inline-mongodb',
+    imageProvider: data.imageProvider || 'github-jsdelivr-cdn',
     totalSold: 0,
     createdBy: ownerEmail,
     createdAt: now,
     updatedAt: now,
   };
 
-  await executeMongo(
-    env,
-    (db) => db.collection('products').insertOne({ ...product }),
-    async () => {
-      await ensureFallbackSeeded();
-      memoryStore.products.unshift(product);
-    }
-  );
+  if (env.DB) {
+    await ensureD1Tables(env);
+    await env.DB.prepare(`
+      INSERT INTO products (id, sku, title, description, quantity, status, color, size, imageUrl, imageProvider, totalSold, createdBy, createdAt, updatedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      product.id,
+      product.sku,
+      product.title,
+      product.description,
+      product.quantity,
+      product.status,
+      product.color,
+      product.size,
+      product.imageUrl,
+      product.imageProvider,
+      product.totalSold,
+      product.createdBy,
+      product.createdAt,
+      product.updatedAt
+    ).run();
+  } else {
+    await ensureFallbackSeeded();
+    memoryStore.products.unshift(product);
+  }
 
   await recordActivity(env, {
     action: 'PRODUCT_CREATED',
@@ -558,22 +516,34 @@ export async function updateProduct(env, id, updates, actor = {}) {
     updatedAt: new Date().toISOString(),
   };
 
-  await executeMongo(
-    env,
-    (db) =>
-      db
-        .collection('products')
-        .updateOne({ id: existing.id, createdBy: ownerEmail }, { $set: updated }),
-    async () => {
-      await ensureFallbackSeeded();
-      const idx = memoryStore.products.findIndex(
-        (p) => p.id === existing.id && String(p.createdBy || '').toLowerCase() === ownerEmail
-      );
-      if (idx !== -1) {
-        memoryStore.products[idx] = updated;
-      }
+  if (env.DB) {
+    await ensureD1Tables(env);
+    await env.DB.prepare(`
+      UPDATE products
+      SET title = ?, description = ?, quantity = ?, status = ?, color = ?, size = ?, imageUrl = ?, imageProvider = ?, updatedAt = ?
+      WHERE id = ? AND LOWER(createdBy) = ?
+    `).bind(
+      updated.title,
+      updated.description,
+      updated.quantity,
+      updated.status,
+      updated.color,
+      updated.size,
+      updated.imageUrl,
+      updated.imageProvider,
+      updated.updatedAt,
+      existing.id,
+      ownerEmail
+    ).run();
+  } else {
+    await ensureFallbackSeeded();
+    const idx = memoryStore.products.findIndex(
+      (p) => p.id === existing.id && String(p.createdBy || '').toLowerCase() === ownerEmail
+    );
+    if (idx !== -1) {
+      memoryStore.products[idx] = updated;
     }
-  );
+  }
 
   const becameOutOfStock = existing.quantity > 0 && updated.quantity === 0;
   const actionType = becameOutOfStock ? 'OUT_OF_STOCK' : 'PRODUCT_UPDATED';
@@ -629,22 +599,22 @@ export async function markProductAsSold(env, id, units = 1, actor = {}) {
     updatedAt: now,
   };
 
-  await executeMongo(
-    env,
-    (db) =>
-      db
-        .collection('products')
-        .updateOne({ id: existing.id, createdBy: ownerEmail }, { $set: updated }),
-    async () => {
-      await ensureFallbackSeeded();
-      const idx = memoryStore.products.findIndex(
-        (p) => p.id === existing.id && String(p.createdBy || '').toLowerCase() === ownerEmail
-      );
-      if (idx !== -1) {
-        memoryStore.products[idx] = updated;
-      }
+  if (env.DB) {
+    await ensureD1Tables(env);
+    await env.DB.prepare(`
+      UPDATE products
+      SET quantity = ?, status = ?, totalSold = ?, updatedAt = ?
+      WHERE id = ? AND LOWER(createdBy) = ?
+    `).bind(updated.quantity, updated.status, updated.totalSold, updated.updatedAt, existing.id, ownerEmail).run();
+  } else {
+    await ensureFallbackSeeded();
+    const idx = memoryStore.products.findIndex(
+      (p) => p.id === existing.id && String(p.createdBy || '').toLowerCase() === ownerEmail
+    );
+    if (idx !== -1) {
+      memoryStore.products[idx] = updated;
     }
-  );
+  }
 
   // Record the sale activity
   await recordActivity(env, {
@@ -669,19 +639,20 @@ export async function deleteProduct(env, id, actor = {}) {
   const existing = await getProductById(env, id, ownerEmail);
   if (!existing) return null;
 
-  await executeMongo(
-    env,
-    (db) => db.collection('products').deleteOne({ id: existing.id, createdBy: ownerEmail }),
-    async () => {
-      await ensureFallbackSeeded();
-      const idx = memoryStore.products.findIndex(
-        (p) => p.id === existing.id && String(p.createdBy || '').toLowerCase() === ownerEmail
-      );
-      if (idx !== -1) {
-        memoryStore.products.splice(idx, 1);
-      }
+  if (env.DB) {
+    await ensureD1Tables(env);
+    await env.DB.prepare('DELETE FROM products WHERE id = ? AND LOWER(createdBy) = ?')
+      .bind(existing.id, ownerEmail)
+      .run();
+  } else {
+    await ensureFallbackSeeded();
+    const idx = memoryStore.products.findIndex(
+      (p) => p.id === existing.id && String(p.createdBy || '').toLowerCase() === ownerEmail
+    );
+    if (idx !== -1) {
+      memoryStore.products.splice(idx, 1);
     }
-  );
+  }
 
   await recordActivity(env, {
     action: 'PRODUCT_DELETED',
@@ -705,26 +676,27 @@ export async function saveImageRecord(env, { id, contentType, base64Data }) {
     createdAt: new Date().toISOString(),
   };
 
-  await executeMongo(
-    env,
-    (db) => db.collection('product_images').insertOne({ ...doc }),
-    async () => {
-      await ensureFallbackSeeded();
-      memoryStore.images.push(doc);
-    }
-  );
+  if (env.DB) {
+    await ensureD1Tables(env);
+    await env.DB.prepare('INSERT INTO product_images (id, contentType, base64Data, createdAt) VALUES (?, ?, ?, ?)')
+      .bind(doc.id, doc.contentType, doc.base64Data, doc.createdAt)
+      .run();
+  } else {
+    await ensureFallbackSeeded();
+    memoryStore.images.push(doc);
+  }
   return doc;
 }
 
 export async function getImageRecord(env, id) {
-  return executeMongo(
-    env,
-    (db) => db.collection('product_images').findOne({ id }, { projection: { _id: 0 } }),
-    async () => {
-      await ensureFallbackSeeded();
-      return memoryStore.images.find((img) => img.id === id) || null;
-    }
-  );
+  if (env.DB) {
+    await ensureD1Tables(env);
+    const row = await env.DB.prepare('SELECT * FROM product_images WHERE id = ?')
+      .bind(id)
+      .first();
+    return row || null;
+  }
+
+  await ensureFallbackSeeded();
+  return memoryStore.images.find((img) => img.id === id) || null;
 }
-
-
