@@ -60,7 +60,10 @@ export function renderCode128Barcode(svgEl, text = 'PRD-0000') {
     }
   }
 
-  svgEl.setAttribute('viewBox', `0 0 ${totalWidth} ${height + 26}`);
+  if (typeof svgEl.setAttribute === 'function') {
+    svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    svgEl.setAttribute('viewBox', `0 0 ${totalWidth} ${height + 26}`);
+  }
   svgEl.innerHTML = `
     <rect width="${totalWidth}" height="${height + 26}" fill="#ffffff" rx="4"/>
     ${rects}

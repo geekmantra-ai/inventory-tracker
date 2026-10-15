@@ -117,12 +117,33 @@ async function runTests() {
   });
   assert.equal(otherUserGet.status, 404);
 
+  // Another user must NOT be able to perform actions (sell, update, delete) on another user's product
+  const otherUserSell = await callWorker(`/api/products/${createdProduct.id}/sell`, {
+    method: 'POST',
+    token: otherUserToken,
+    body: { units: 1 },
+  });
+  assert.equal(otherUserSell.status, 404);
+
+  const otherUserUpdate = await callWorker(`/api/products/${createdProduct.id}`, {
+    method: 'PUT',
+    token: otherUserToken,
+    body: { title: 'Hacked Title' },
+  });
+  assert.equal(otherUserUpdate.status, 404);
+
+  const otherUserDelete = await callWorker(`/api/products/${createdProduct.id}`, {
+    method: 'DELETE',
+    token: otherUserToken,
+  });
+  assert.equal(otherUserDelete.status, 404);
+
   // Owner (admin@inventory.io) can view their own product
   const getRes = await callWorker(`/api/products/${createdProduct.id}`, { token });
   assert.equal(getRes.status, 200);
   assert.equal(getRes.data.product.id, createdProduct.id);
   assert.ok(Array.isArray(getRes.data.activities));
-  console.log('✓ 5. Verified strict user-specific product isolation & 401 unauthenticated protection');
+  console.log('✓ 5. Verified strict user-specific product isolation, 401 protection, and blocked actions for other users');
 
   // 6. Edit / Update Product
   const updateRes = await callWorker(`/api/products/${createdProduct.id}`, {

@@ -419,6 +419,35 @@ function renderProductsGrid() {
 async function openProductDetailView(productId, fromQrScan = false) {
   if (!state.token || !state.user) {
     state.selectedProductId = productId;
+    switchTabView('product-detail');
+
+    const scanBadge = document.getElementById('detailScanIndicator');
+    if (scanBadge) scanBadge.hidden = !fromQrScan;
+
+    const targetPath = `/product/${encodeURIComponent(productId)}`;
+    if (window.location.pathname !== targetPath) {
+      window.history.pushState({ productId }, '', targetPath);
+    }
+
+    const container = document.getElementById('productDetailContent');
+    container.innerHTML = `
+      <div class="auth-gate-card">
+        <div class="auth-gate-icon">🔒</div>
+        <h2>Authentication Required</h2>
+        <p>Product <strong>${escapeHtml(productId)}</strong> is protected by strict user account isolation.</p>
+        <p class="field-hint">
+          Only the user who created this product has permission to view its details, monitor stock levels, and perform inventory actions.
+        </p>
+        <div style="margin-top:1.5rem; display:flex; gap:0.75rem; justify-content:center; flex-wrap:wrap;">
+          <button type="button" class="btn btn-primary" id="gateSignInBtn">Sign In to View Product</button>
+          <button type="button" class="btn btn-secondary" id="gateBackBtn">&larr; Return to Inventory</button>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('gateSignInBtn')?.addEventListener('click', () => openAuthModal('login'));
+    document.getElementById('gateBackBtn')?.addEventListener('click', () => switchTabView('inventory'));
+
     showToast('Please sign in to view this product.', 'info');
     openAuthModal('login');
     return;
@@ -465,10 +494,16 @@ async function openProductDetailView(productId, fromQrScan = false) {
               <div class="qr-box">
                 <div id="detailQrSvgBox" class="qr-svg-wrapper"></div>
                 <span class="code-caption">Scan to open this page</span>
+                <button type="button" class="btn btn-xs btn-secondary" id="detailDownloadQrBtn" style="margin-top:0.45rem; width:100%;">
+                  Download QR PNG
+                </button>
               </div>
               <div class="barcode-box">
                 <svg id="detailBarcodeSvgBox" class="barcode-svg"></svg>
                 <span class="code-caption">SKU Barcode</span>
+                <button type="button" class="btn btn-xs btn-secondary" id="detailDownloadBarcodeBtn" style="margin-top:0.45rem; width:100%;">
+                  Download Barcode PNG
+                </button>
               </div>
             </div>
             <div style="margin-top:0.5rem; font-size:0.76rem; color:#475569; word-break:break-all;">
@@ -516,8 +551,8 @@ async function openProductDetailView(productId, fromQrScan = false) {
               <strong>${Number(product.totalSold) || 0} units</strong>
             </div>
             <div class="detail-meta-item">
-              <span>Image Storage</span>
-              <strong>${escapeHtml(product.imageProvider || 'inline-mongodb')}</strong>
+              <span>Owner Account</span>
+              <strong>${escapeHtml(product.createdBy || state.user?.email || 'You')}</strong>
             </div>
           </div>
 
@@ -561,13 +596,54 @@ async function openProductDetailView(productId, fromQrScan = false) {
     renderQrCodeSvg(document.getElementById('detailQrSvgBox'), productUrl);
     renderCode128Barcode(document.getElementById('detailBarcodeSvgBox'), product.id);
 
+    document.getElementById('detailDownloadQrBtn')?.addEventListener('click', () => {
+      const qrSvg = document.querySelector('#detailQrSvgBox svg');
+      downloadQrAsPng(product, qrSvg);
+    });
+    document.getElementById('detailDownloadBarcodeBtn')?.addEventListener('click', () => {
+      const barcodeSvg = document.getElementById('detailBarcodeSvgBox');
+      downloadBarcodeAsPng(product, barcodeSvg);
+    });
+
     document.getElementById('detailSellBtn')?.addEventListener('click', () => handleMarkAsSold(product.id));
     document.getElementById('detailShowQrModalBtn')?.addEventListener('click', () => openBarcodeModal(product));
     document.getElementById('detailEditBtn')?.addEventListener('click', () => openProductModal(product));
     document.getElementById('detailDeleteBtn')?.addEventListener('click', () => openDeleteModal(product));
   } catch (err) {
-    showToast(`Could not load product "${productId}": ${err.message}`, 'error');
-    switchTabView('inventory');
+    switchTabView('product-detail');
+    const container = document.getElementById('productDetailContent');
+    const scanBadge = document.getElementById('detailScanIndicator');
+    if (scanBadge) scanBadge.hidden = !fromQrScan;
+
+    container.innerHTML = `
+      <div class="auth-gate-card access-denied">
+        <div class="auth-gate-icon">⛔</div>
+        <h2>Product Not Found In Your Account</h2>
+        <p>
+          Product <strong>${escapeHtml(productId)}</strong> does not exist in your account (<code>${escapeHtml(state.user?.email || '')}</code>).
+        </p>
+        <p class="field-hint">
+          StockPulse strictly isolates products per account. Only the user who created this product has permission to view its details or perform actions.
+        </p>
+        <div style="margin-top:1.5rem; display:flex; gap:0.75rem; justify-content:center; flex-wrap:wrap;">
+          <button type="button" class="btn btn-secondary" id="deniedBackBtn">&larr; Return to My Inventory</button>
+          <button type="button" class="btn btn-primary" id="deniedSwitchBtn">Sign In With Different Account</button>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('deniedBackBtn')?.addEventListener('click', () => switchTabView('inventory'));
+    document.getElementById('deniedSwitchBtn')?.addEventListener('click', () => {
+      state.token = null;
+      state.user = null;
+      state.selectedProductId = productId;
+      localStorage.removeItem('inventory_auth_token');
+      localStorage.removeItem('inventory_auth_user');
+      renderAuthStatus();
+      openAuthModal('login');
+    });
+
+    showToast(`Access Denied: Product "${productId}" is not in your account.`, 'error');
   }
 }
 
@@ -732,11 +808,17 @@ function openBarcodeModal(product) {
   const downloadBtn = document.getElementById('downloadQrBtn');
   downloadBtn.onclick = () => downloadQrAsPng(product);
 
+  const downloadBarcodeBtn = document.getElementById('downloadBarcodeBtn');
+  if (downloadBarcodeBtn) {
+    downloadBarcodeBtn.onclick = () =>
+      downloadBarcodeAsPng(product, document.getElementById('barcodeSvg'));
+  }
+
   if (!dialog.open) dialog.showModal();
 }
 
-function downloadQrAsPng(product) {
-  const svgEl = document.querySelector('#qrCodeContainer svg');
+function downloadQrAsPng(product, targetSvg = null) {
+  const svgEl = targetSvg || document.querySelector('#qrCodeContainer svg');
   if (!svgEl) return;
   const svgData = new XMLSerializer().serializeToString(svgEl);
   const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
@@ -754,9 +836,71 @@ function downloadQrAsPng(product) {
     URL.revokeObjectURL(url);
 
     const a = document.createElement('a');
-    a.download = `${product.id}-qrcode.png`;
+    const skuCode = (product?.id || product?.sku || 'qrcode').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filename = `${skuCode}-qrcode.png`;
+    a.download = filename;
     a.href = canvas.toDataURL('image/png');
     a.click();
+    showToast(`Downloaded QR code: ${filename}`, 'success');
+  };
+  img.onerror = () => {
+    URL.revokeObjectURL(url);
+    showToast('Failed to generate QR code PNG.', 'error');
+  };
+  img.src = url;
+}
+
+function downloadBarcodeAsPng(product, targetSvg = null) {
+  const svgEl = targetSvg || document.getElementById('barcodeSvg');
+  if (!svgEl) return;
+
+  const viewBox = svgEl.getAttribute('viewBox');
+  let vbWidth = 360;
+  let vbHeight = 90;
+  if (viewBox) {
+    const parts = viewBox.trim().split(/\s+/).map(Number);
+    if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+      vbWidth = parts[2];
+      vbHeight = parts[3];
+    }
+  }
+
+  // Scale up for high-DPI crisp export suitable for barcode scanners
+  const scale = Math.max(3, Math.ceil(900 / vbWidth));
+  const canvasWidth = vbWidth * scale;
+  const canvasHeight = vbHeight * scale;
+
+  if (!svgEl.getAttribute('xmlns')) {
+    svgEl.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  }
+
+  const svgData = new XMLSerializer().serializeToString(svgEl);
+  const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(svgBlob);
+
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    ctx.drawImage(img, 0, 0, canvasWidth, canvasHeight);
+    URL.revokeObjectURL(url);
+
+    const a = document.createElement('a');
+    const skuCode = (product?.id || product?.sku || 'barcode').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filename = `${skuCode}-barcode.png`;
+    a.download = filename;
+    a.href = canvas.toDataURL('image/png');
+    a.click();
+    showToast(`Downloaded barcode: ${filename}`, 'success');
+  };
+  img.onerror = () => {
+    URL.revokeObjectURL(url);
+    showToast('Failed to generate barcode PNG.', 'error');
   };
   img.src = url;
 }
@@ -806,7 +950,12 @@ async function handleScannedCode(rawCode) {
   const scannerDialog = document.getElementById('scannerDialog');
   if (scannerDialog?.open) scannerDialog.close();
 
-  showToast(`Scanned code: ${productId} — opening Product Display Page...`, 'success');
+  if (!state.token || !state.user) {
+    state.selectedProductId = productId;
+    showToast(`Scanned product ${productId}. Sign in with the owner account to open.`, 'info');
+  } else {
+    showToast(`Scanned code: ${productId} — verifying owner access...`, 'info');
+  }
   await openProductDetailView(productId, true);
 }
 

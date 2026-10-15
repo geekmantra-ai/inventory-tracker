@@ -238,6 +238,11 @@ body {
   font-size: 0.8rem;
 }
 
+.btn-xs {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+
 .btn-icon {
   background: transparent;
   border: none;
@@ -1071,6 +1076,42 @@ dialog::backdrop {
 
 .toast-popover + .toast-popover {
   margin-bottom: 3.5rem;
+}
+
+/* Authentication Gate & Access Denied Cards */
+.auth-gate-card {
+  text-align: center;
+  padding: 3rem 1.5rem;
+  max-width: 540px;
+  margin: 2rem auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.auth-gate-card.access-denied {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.02);
+}
+
+.auth-gate-icon {
+  font-size: 3rem;
+  line-height: 1;
+  margin-bottom: 1rem;
+}
+
+.auth-gate-card h2 {
+  font-size: 1.35rem;
+  margin: 0 0 0.75rem;
+  color: var(--text-primary);
+}
+
+.auth-gate-card p {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem;
+  line-height: 1.5;
 }
 
 @media print {
