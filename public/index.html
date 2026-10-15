@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>StockPulse — Cloud Inventory &amp; QR/Barcode Platform</title>
+  <link rel="stylesheet" href="/styles.css">
+  <!-- Mandatory Popover API feature detection & conditional polyfill per modern-web-guidance -->
+  <script type="module">
+    if (!("popover" in HTMLElement.prototype)) {
+      import("https://unpkg.com/@oddbird/popover-polyfill@latest/dist/popover.min.js");
+    }
+  </script>
+</head>
+<body>
+  <!-- Top Navigation Bar -->
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a href="/" class="brand" id="navHomeLink">
+        <span class="brand-icon" aria-hidden="true">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+            <line x1="12" y1="22.08" x2="12" y2="12"/>
+          </svg>
+        </span>
+        <div>
+          <span class="brand-name">StockPulse</span>
+        </div>
+      </a>
+
+      <nav class="nav-tabs" aria-label="Main navigation">
+        <button type="button" class="nav-tab active" data-view="inventory" id="tabInventory">
+          Inventory
+        </button>
+        <button type="button" class="nav-tab" data-view="activity" id="tabActivity">
+          Activity History
+        </button>
+      </nav>
+
+      <div class="topbar-actions">
+        <button type="button" class="btn btn-secondary" id="openScannerBtn" title="Scan a QR Code or Barcode to open Product Display Page">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+            <rect x="7" y="7" width="3" height="3"/><rect x="14" y="7" width="3" height="3"/><rect x="7" y="14" width="3" height="3"/><rect x="14" y="14" width="3" height="3"/>
+          </svg>
+          <span>Scan QR / Barcode</span>
+        </button>
+
+        <button type="button" class="btn btn-primary" id="openAddProductBtn">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          <span>Add Product</span>
+        </button>
+
+        <div class="auth-status" id="authStatusArea">
+          <!-- Populated dynamically by app.js -->
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-container">
+    <!-- Banner for Unauthenticated Visitors -->
+    <section class="auth-banner" id="guestBanner" hidden>
+      <div class="auth-banner-content">
+        <div>
+          <strong>Admin Authentication Required for Changes</strong>
+          <p>Sign in with your account (or use demo credentials <code>admin@inventory.io</code> / <code>Admin@123</code>) to add, edit, sell, or delete products.</p>
+        </div>
+        <div class="auth-banner-buttons">
+          <button type="button" class="btn btn-secondary" id="quickDemoLoginBtn">1-Click Demo Admin Login</button>
+          <button type="button" class="btn btn-primary" id="bannerLoginBtn">Sign In / Register</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- VIEW 1: INVENTORY DASHBOARD -->
+    <section id="viewInventory" class="view-section">
+      <!-- KPI Summary Cards -->
+      <div class="stats-grid" aria-label="Inventory metrics">
+        <article class="stat-card">
+          <span class="stat-label">Total Products</span>
+          <strong class="stat-value" id="statTotalProducts">0</strong>
+          <span class="stat-sub">Unique SKUs with QR/Barcodes</span>
+        </article>
+        <article class="stat-card">
+          <span class="stat-label">Total Units in Stock</span>
+          <strong class="stat-value" id="statTotalUnits">0</strong>
+          <span class="stat-sub">Available across all products</span>
+        </article>
+        <article class="stat-card stat-warning">
+          <span class="stat-label">Out of Stock (Qty = 0)</span>
+          <strong class="stat-value" id="statOutOfStock">0</strong>
+          <span class="stat-sub">Requires restock</span>
+        </article>
+        <article class="stat-card stat-success">
+          <span class="stat-label">Total Units Sold</span>
+          <strong class="stat-value" id="statTotalSold">0</strong>
+          <span class="stat-sub">Tracked via Mark as Sold</span>
+        </article>
+      </div>
+
+      <!-- Search & Filter Bar -->
+      <form class="filter-bar" id="filterForm" action="/api/products" method="GET">
+        <div class="filter-search-group">
+          <label for="searchInput" class="sr-only">Search inventory</label>
+          <input
+            type="search"
+            id="searchInput"
+            name="search"
+            placeholder="Search by title, SKU/barcode (e.g. PRD-...), color, or size..."
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            enterkeyhint="search"
+          >
+        </div>
+
+        <fieldset class="stock-radio-group">
+          <legend class="sr-only">Filter by stock status</legend>
+          <label class="radio-pill">
+            <input type="radio" name="statusFilter" value="" checked>
+            <span>All Items</span>
+          </label>
+          <label class="radio-pill">
+            <input type="radio" name="statusFilter" value="in_stock">
+            <span>In Stock</span>
+          </label>
+          <label class="radio-pill">
+            <input type="radio" name="statusFilter" value="out_of_stock">
+            <span>Out of Stock (0)</span>
+          </label>
+          <label class="radio-pill">
+            <input type="radio" name="statusFilter" value="low_stock">
+            <span>Low Stock (&le;5)</span>
+          </label>
+        </fieldset>
+      </form>
+
+      <!-- Products Grid -->
+      <div id="productsGrid" class="products-grid" aria-live="polite">
+        <!-- Rendered by app.js -->
+      </div>
+    </section>
+
+    <!-- VIEW 2: DEDICATED PRODUCT DISPLAY PAGE (Opened via QR/Barcode Scan or Clicking a Product) -->
+    <section id="viewProductDetail" class="view-section" hidden>
+      <div class="detail-topbar">
+        <button type="button" class="btn btn-secondary" id="backToInventoryBtn">
+          &larr; Back to All Products
+        </button>
+        <span class="detail-scan-badge" id="detailScanIndicator" hidden>
+          Opened via Product QR / Barcode Link
+        </span>
+      </div>
+
+      <div id="productDetailContent" class="product-detail-card">
+        <!-- Populated dynamically by app.js -->
+      </div>
+    </section>
+
+    <!-- VIEW 3: ACTIVITY HISTORY TRACKING -->
+    <section id="viewActivity" class="view-section" hidden>
+      <div class="section-header">
+        <div>
+          <h1>Activity History Tracking</h1>
+          <p class="section-subtitle">Complete audit trail of product creations, updates, sales, out-of-stock transitions, deletions, and user logins.</p>
+        </div>
+        <button type="button" class="btn btn-secondary" id="refreshActivityBtn">Refresh Log</button>
+      </div>
+
+      <div id="activityTimeline" class="activity-timeline" aria-live="polite">
+        <!-- Rendered by app.js -->
+      </div>
+    </section>
+  </main>
+
+  <!-- MODAL 1: ADD / EDIT PRODUCT (<dialog closedby="any"> per modern-web-guidance) -->
+  <dialog id="productDialog" closedby="any" aria-labelledby="productDialogTitle" class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="productDialogTitle">Add New Product</h2>
+        <button type="button" class="btn-icon" id="closeProductDialogBtn" aria-label="Close dialog">&times;</button>
+      </div>
+
+      <form id="productForm" action="/api/products" method="POST" novalidate>
+        <input type="hidden" id="productIdInput" name="id">
+
+        <fieldset class="form-fieldset">
+          <legend class="fieldset-legend">Required Product Information</legend>
+
+          <div class="form-field">
+            <label for="productTitleInput">Product Title <span class="req-marker" aria-hidden="true">*</span></label>
+            <input
+              type="text"
+              id="productTitleInput"
+              name="title"
+              required
+              minlength="2"
+              maxlength="120"
+              enterkeyhint="next"
+              aria-describedby="titleHelp"
+            >
+            <span id="titleHelp" class="field-hint">Clear product name shown on inventory cards and QR display page.</span>
+          </div>
+
+          <div class="form-field">
+            <label for="productDescInput">Description <span class="req-marker" aria-hidden="true">*</span></label>
+            <textarea
+              id="productDescInput"
+              name="description"
+              rows="3"
+              required
+              minlength="3"
+              aria-describedby="descHelp"
+            ></textarea>
+            <span id="descHelp" class="field-hint">Include key specifications, materials, or warehouse location notes.</span>
+          </div>
+
+          <div class="form-field">
+            <label for="productQtyInput">Quantity in Stock <span class="req-marker" aria-hidden="true">*</span></label>
+            <input
+              type="number"
+              id="productQtyInput"
+              name="quantity"
+              required
+              min="0"
+              step="1"
+              value="1"
+              inputmode="numeric"
+              enterkeyhint="next"
+              aria-describedby="qtyHelp"
+            >
+            <span id="qtyHelp" class="field-hint">Setting quantity to 0 automatically marks the product as <strong>Out of Stock</strong>.</span>
+          </div>
+        </fieldset>
+
+        <fieldset class="form-fieldset">
+          <legend class="fieldset-legend">Optional Attributes &amp; Product Picture</legend>
+
+          <div class="form-row-2">
+            <div class="form-field">
+              <label for="productColorInput">Color <span class="opt-marker">(Optional)</span></label>
+              <input
+                type="text"
+                id="productColorInput"
+                name="color"
+                enterkeyhint="next"
+                aria-describedby="colorHelp"
+              >
+              <span id="colorHelp" class="field-hint">e.g. Midnight Black, Silver, Crimson</span>
+            </div>
+
+            <div class="form-field">
+              <label for="productSizeInput">Size <span class="opt-marker">(Optional)</span></label>
+              <input
+                type="text"
+                id="productSizeInput"
+                name="size"
+                enterkeyhint="next"
+                aria-describedby="sizeHelp"
+              >
+              <span id="sizeHelp" class="field-hint">e.g. Medium, XL, 27 inch, 500ml</span>
+            </div>
+          </div>
+
+          <div class="form-field">
+            <label for="productImageInput">Upload Product Picture</label>
+            <input
+              type="file"
+              id="productImageInput"
+              name="imageFile"
+              accept="image/*"
+              aria-describedby="imageHelp"
+            >
+            <span id="imageHelp" class="field-hint">Automatically optimized to WebP and uploaded to your GitHub Repository + jsDelivr CDN (<code>GITHUB_TOKEN</code> &amp; <code>GITHUB_REPO</code>).</span>
+          </div>
+
+          <div class="form-field">
+            <label for="productDriveUrlInput">Or Paste an Existing Image URL <span class="opt-marker">(Optional)</span></label>
+            <input
+              type="text"
+              id="productDriveUrlInput"
+              name="imageUrl"
+              autocomplete="off"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              enterkeyhint="done"
+              aria-describedby="driveUrlHelp"
+            >
+            <span id="driveUrlHelp" class="field-hint">Supports any GitHub raw/jsDelivr URL or external image URL.</span>
+
+            <div id="imagePreviewWrapper" class="image-preview-wrapper" hidden>
+              <img id="imagePreviewEl" src="" alt="Selected product preview">
+              <button type="button" class="btn btn-sm btn-danger" id="clearImageBtn">Remove Picture</button>
+            </div>
+          </div>
+        </fieldset>
+
+        <div id="productFormError" class="form-error-banner" role="alert" aria-live="polite" hidden></div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="cancelProductDialogBtn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="submitProductBtn">
+            Save Product &amp; Generate QR / Barcode
+          </button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- MODAL 2: GENERATED QR CODE & BARCODE MODAL (Shown immediately after adding a product or clicking QR icon) -->
+  <dialog id="barcodeDialog" closedby="any" aria-labelledby="barcodeDialogTitle" class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="barcodeDialogTitle">Product Barcode &amp; QR Code Generated</h2>
+        <button type="button" class="btn-icon" id="closeBarcodeDialogBtn" aria-label="Close dialog">&times;</button>
+      </div>
+
+      <div class="barcode-modal-body" id="printableLabelArea">
+        <div class="label-card">
+          <div class="label-header">
+            <strong id="labelProductTitle" class="label-title">Product Title</strong>
+            <span id="labelProductMeta" class="label-meta">SKU: PRD-XXXX</span>
+          </div>
+
+          <div class="codes-showcase">
+            <div class="qr-box">
+              <div id="qrCodeContainer" class="qr-svg-wrapper" aria-label="Product QR Code"></div>
+              <span class="code-caption">Scan QR to open Product Display Page</span>
+            </div>
+
+            <div class="barcode-box">
+              <svg id="barcodeSvg" class="barcode-svg" aria-label="Product Code-128 Barcode"></svg>
+              <span class="code-caption">Code-128 Barcode (<span id="barcodeSkuText"></span>)</span>
+            </div>
+          </div>
+
+          <div class="label-url-box">
+            <span class="label-url-caption">Direct Product Display URL (encoded in QR):</span>
+            <a href="#" id="labelDirectLink" class="label-direct-link"></a>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="downloadQrBtn">Download QR PNG</button>
+        <button type="button" class="btn btn-secondary" id="printLabelBtn">Print Barcode / QR Label</button>
+        <button type="button" class="btn btn-primary" id="openProductFromLabelBtn">
+          Open Product Display Page &rarr;
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- MODAL 3: SCAN QR CODE / BARCODE MODAL -->
+  <dialog id="scannerDialog" closedby="any" aria-labelledby="scannerDialogTitle" class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="scannerDialogTitle">Scan Barcode or QR Code</h2>
+        <button type="button" class="btn-icon" id="closeScannerDialogBtn" aria-label="Close dialog">&times;</button>
+      </div>
+
+      <div class="scanner-body">
+        <p class="field-hint">
+          Scan a product QR code or barcode using your camera, upload a label image, or scan/type the SKU or URL below to immediately open the <strong>Product Display Page</strong>.
+        </p>
+
+        <div class="camera-scanner-box">
+          <video id="scannerVideo" playsinline muted hidden></video>
+          <div id="cameraPlaceholder" class="camera-placeholder">
+            <button type="button" class="btn btn-primary" id="startCameraScanBtn">
+              Start Camera QR / Barcode Scanner
+            </button>
+            <button type="button" class="btn btn-secondary" id="stopCameraScanBtn" hidden>
+              Stop Camera
+            </button>
+          </div>
+        </div>
+
+        <form id="manualScanForm" action="/api/products" method="GET" class="manual-scan-form">
+          <div class="form-field">
+            <label for="manualScanInput">Or Scan with USB Scanner / Enter SKU or Product URL</label>
+            <div class="input-with-button">
+              <input
+                type="text"
+                id="manualScanInput"
+                name="code"
+                required
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="off"
+                spellcheck="false"
+                enterkeyhint="go"
+                aria-describedby="manualScanHelp"
+              >
+              <button type="submit" class="btn btn-primary">Open Product</button>
+            </div>
+            <span id="manualScanHelp" class="field-hint">Try entering <code>PRD-A7X9K2M4</code> or pasting a full product URL.</span>
+          </div>
+        </form>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- MODAL 4: LOGIN & REGISTER (<dialog closedby="any">) -->
+  <dialog id="authDialog" closedby="any" aria-labelledby="authDialogTitle" class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="authDialogTitle">Admin &amp; User Sign In</h2>
+        <button type="button" class="btn-icon" id="closeAuthDialogBtn" aria-label="Close dialog">&times;</button>
+      </div>
+
+      <div class="auth-mode-switch" role="tablist">
+        <button type="button" class="auth-tab active" id="tabLoginMode">Sign In</button>
+        <button type="button" class="auth-tab" id="tabRegisterMode">Create Account</button>
+      </div>
+
+      <form id="authForm" action="/api/auth/login" method="POST" novalidate>
+        <div class="form-field" id="authNameField" hidden>
+          <label for="authNameInput">Full Name</label>
+          <input
+            type="text"
+            id="authNameInput"
+            name="name"
+            autocomplete="name"
+            enterkeyhint="next"
+          >
+        </div>
+
+        <div class="form-field">
+          <label for="authEmailInput">Email Address <span class="req-marker" aria-hidden="true">*</span></label>
+          <input
+            type="email"
+            id="authEmailInput"
+            name="email"
+            required
+            autocomplete="email"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+            enterkeyhint="next"
+            value="admin@inventory.io"
+          >
+        </div>
+
+        <div class="form-field">
+          <label for="authPasswordInput">Password <span class="req-marker" aria-hidden="true">*</span></label>
+          <input
+            type="password"
+            id="authPasswordInput"
+            name="password"
+            required
+            minlength="6"
+            autocomplete="current-password"
+            enterkeyhint="done"
+            value="Admin@123"
+            aria-describedby="passwordHelp"
+          >
+          <span id="passwordHelp" class="field-hint">Default demo admin: <code>admin@inventory.io</code> / <code>Admin@123</code></span>
+        </div>
+
+        <div id="authFormError" class="form-error-banner" role="alert" aria-live="polite" hidden></div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="cancelAuthDialogBtn">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="submitAuthBtn">Sign In</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- MODAL 5: DELETE CONFIRMATION DIALOG -->
+  <dialog id="deleteConfirmDialog" closedby="any" aria-labelledby="deleteDialogTitle" class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="deleteDialogTitle">Delete Product?</h2>
+        <button type="button" class="btn-icon" id="closeDeleteDialogBtn" aria-label="Close dialog">&times;</button>
+      </div>
+      <p id="deleteDialogMessage" class="delete-confirm-text">
+        Are you sure you want to permanently delete this product? This action will be recorded in Activity History.
+      </p>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" id="cancelDeleteBtn">Cancel</button>
+        <button type="button" class="btn btn-danger" id="confirmDeleteBtn">Delete Permanently</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- PERSISTENT TOAST CONTAINER (Uses popover="manual" per modern-web-guidance) -->
+  <div id="toastStack" class="toast-stack" aria-live="polite"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
+

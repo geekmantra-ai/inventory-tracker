@@ -1,0 +1,20 @@
+{
+  "name": "inventory-management-platform",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker + Cloud MongoDB Inventory Management Platform with QR/Barcode generation & scanning",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "start": "node src/local-server.js",
+    "deploy": "wrangler deploy",
+    "deploy:secrets": "wrangler secret bulk .dev.vars",
+    "test": "node test/api.test.js"
+  },
+  "dependencies": {
+    "mongodb": "^6.10.0"
+  },
+  "devDependencies": {
+    "wrangler": "^3.86.0"
+  }
+}
